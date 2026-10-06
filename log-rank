@@ -1,0 +1,172 @@
+import pandas as pd
+from lifelines.statistics import logrank_test
+from lifelines import CoxPHFitter, KaplanMeierFitter
+from statsmodels.stats.multitest import multipletests
+
+# =====================================================
+# IMPORTAÇÃO
+# =====================================================
+
+arquivo = "/home/sara/Documentos/latk318.xlsx"
+
+df = pd.read_excel(arquivo)
+
+df["grupo"] = df["grupo"].str.strip()
+df["evento"] = (df["tempo"] != 600).astype(int)
+
+controle = "SAL"
+
+# =====================================================
+# COMPARAÇÕES
+# =====================================================
+
+resultados = []
+
+grupos = sorted(df["grupo"].unique())
+
+if controle not in grupos:
+    raise ValueError("Grupo SAL não encontrado.")
+
+grupos.remove(controle)
+
+for grupo in grupos:
+
+    sal = df[df["grupo"] == controle]
+    trat = df[df["grupo"] == grupo]
+
+    # -----------------------------
+    # Kaplan-Meier
+    # -----------------------------
+
+    km_sal = KaplanMeierFitter()
+    km_sal.fit(
+        sal["tempo"],
+        event_observed=sal["evento"]
+    )
+
+    km_trat = KaplanMeierFitter()
+    km_trat.fit(
+        trat["tempo"],
+        event_observed=trat["evento"]
+    )
+
+    med_sal = km_sal.median_survival_time_
+    med_trat = km_trat.median_survival_time_
+
+    # -----------------------------
+    # Log-rank
+    # -----------------------------
+
+    lr = logrank_test(
+        sal["tempo"],
+        trat["tempo"],
+        event_observed_A=sal["evento"],
+        event_observed_B=trat["evento"]
+    )
+
+    # -----------------------------
+    # Cox
+    # -----------------------------
+
+    dados = pd.concat([sal, trat]).copy()
+
+    dados["Grupo_bin"] = (
+        dados["grupo"] == grupo
+    ).astype(int)
+
+    cph = CoxPHFitter()
+
+    cph.fit(
+        dados[["tempo", "evento", "Grupo_bin"]],
+        duration_col="tempo",
+        event_col="evento"
+    )
+
+    resumo = cph.summary.loc["Grupo_bin"]
+
+    HR = resumo["exp(coef)"]
+    ICinf = resumo["exp(coef) lower 95%"]
+    ICsup = resumo["exp(coef) upper 95%"]
+
+    resultados.append({
+
+        "Comparação": f"SAL × {grupo}",
+
+        "N SAL": len(sal),
+        "N Grupo": len(trat),
+
+        "Eventos SAL": sal["evento"].sum(),
+        "Eventos Grupo": trat["evento"].sum(),
+
+        "Mediana SAL": med_sal,
+        "Mediana Grupo": med_trat,
+
+        "χ²": lr.test_statistic,
+        "p": lr.p_value,
+
+        "HR": HR,
+        "IC95% inferior": ICinf,
+        "IC95% superior": ICsup
+
+    })
+
+# =====================================================
+# TABELA
+# =====================================================
+
+resultado = pd.DataFrame(resultados)
+
+# -----------------------------
+# Correção de Holm
+# -----------------------------
+
+reject, p_holm, _, _ = multipletests(
+    resultado["p"],
+    alpha=0.05,
+    method="Holm"
+)
+
+resultado["p ajustado (Holm)"] = p_holm
+resultado["Significativo"] = reject
+
+# -----------------------------
+# Formatação
+# -----------------------------
+
+resultado["χ²"] = resultado["χ²"].round(2)
+
+resultado["p"] = resultado["p"].apply(
+    lambda x: "<0.001" if x < 0.001 else f"{x:.3f}"
+)
+
+resultado["p ajustado (Holm)"] = resultado["p ajustado (Holm)"].apply(
+    lambda x: "<0.001" if x < 0.001 else f"{x:.3f}"
+)
+
+resultado["HR (IC95%)"] = resultado.apply(
+    lambda r: f'{r["HR"]:.2f} ({r["IC95% inferior"]:.2f}–{r["IC95% superior"]:.2f})',
+    axis=1
+)
+
+resultado.drop(
+    columns=["HR","IC95% inferior","IC95% superior"],
+    inplace=True
+)
+
+resultado = resultado.sort_values(
+    by="p ajustado (Holm)",
+)
+
+print(resultado)
+
+# =====================================================
+# EXPORTAÇÃO
+# =====================================================
+
+resultado.to_excel(
+    "/home/sara/Documentos/LogRank_Holm.xlsx",
+    index=False
+)
+
+print("\nTabela salva em:")
+print("/home/sara/Documentos/LogRank_Holm.xlsx")
